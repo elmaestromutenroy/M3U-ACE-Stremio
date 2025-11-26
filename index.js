@@ -20,11 +20,13 @@ class AceManager {
         const cacheKey = `${config.m3u}::${config.ip || 'original'}`;
         const now = Date.now();
 
+        // Caché de 10 horas
         if (this.cache.has(cacheKey) && (now - this.lastUpdates.get(cacheKey) < 36000 * 1000)) {
             return this.cache.get(cacheKey);
         }
 
-        console.log(`--> [CARGA] IP Target: ${config.ip || 'Original'}`);
+        console.log(`--> [CARGA] Procesando lista...`);
+        console.log(`    IP: ${config.ip || 'Original'} | URL: ${config.m3u}`);
         
         try {
             const res = await fetch(config.m3u);
@@ -33,7 +35,7 @@ class AceManager {
                 const items = this.parseM3U(text, config.ip);
                 this.cache.set(cacheKey, items);
                 this.lastUpdates.set(cacheKey, now);
-                console.log(`--> [OK] ${items.length} canales cacheados.`);
+                console.log(`--> [OK] ${items.length} canales listos.`);
                 return items;
             } else {
                 console.log(`--> [ERROR] HTTP ${res.status}`);
@@ -97,20 +99,21 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
     try {
-        // LOG CHIVATO: Ver qué pide Stremio exactamente
-        console.log(`--> [PETICIÓN] URL: ${req.url}`);
-
         const u = new URL(req.url, `http://${req.headers.host}`);
         const pathSegments = u.pathname.split('/').filter(Boolean);
 
-        // A. REDIRECCIÓN (SETUP)
-        if (u.searchParams.has('ip') || u.searchParams.has('m3u')) {
+        // A. REDIRECCIÓN (FIX BUCLE INFINITO)
+        // Solo redirigimos si hay parámetros Y estamos intentando instalar (manifest o root)
+        // Si la URL contiene 'catalog', 'meta' o 'stream', IGNORAMOS los parámetros y seguimos.
+        const isInstallUrl = pathSegments.length === 0 || (pathSegments.length === 1 && pathSegments[0] === 'manifest.json');
+        
+        if ((u.searchParams.has('ip') || u.searchParams.has('m3u')) && isInstallUrl) {
             const configObj = {
                 ip: u.searchParams.get('ip') || null,
                 m3u: u.searchParams.get('m3u') || DEFAULTS.m3uUrl
             };
             const configStr = Buffer.from(JSON.stringify(configObj)).toString('base64url');
-            console.log(`--> [REDIRECT] Config creada: ${configStr}`);
+            console.log(`--> [REDIRECT] Nueva config detectada. Redirigiendo...`);
             res.writeHead(302, { 'Location': `/${configStr}/manifest.json` });
             res.end();
             return;
@@ -120,12 +123,10 @@ const server = http.createServer(async (req, res) => {
         let config = { ip: null, m3u: DEFAULTS.m3uUrl };
         let resource = "";
 
-        // Detectar si el primer segmento es configuración (Base64)
         if (pathSegments.length > 0 && pathSegments[0] !== 'manifest.json' && !pathSegments[0].includes('/')) {
             try {
                 const decoded = Buffer.from(pathSegments[0], 'base64url').toString();
                 const parsed = JSON.parse(decoded);
-                // Verificamos que sea un JSON válido de config
                 if (parsed.m3u || parsed.ip === null || parsed.ip) {
                     config = { ...config, ...parsed };
                     resource = pathSegments.slice(1).join('/');
@@ -149,15 +150,14 @@ const server = http.createServer(async (req, res) => {
         // D. RESPUESTAS
 
         if (resource === 'manifest.json') {
-            // ID DINÁMICO: Evita conflictos en Stremio si instalas varias IPs
+            // ID DINÁMICO V11
             const safeIP = (config.ip || 'default').replace(/\./g, '-');
             
             const manifest = {
-                id: `org.milista.ace.v10.${safeIP}`, // <--- CAMBIO CLAVE
-                version: "1.0.10",
+                id: `org.milista.ace.v11.${safeIP}`, // Versión 11
+                version: "1.0.11",
                 name: config.ip ? `ACE (${config.ip})` : "ACE (Default)",
-                description: "Lista Dinámica V10",
-                description: `Fuente: ${config.m3u === DEFAULTS.m3uUrl ? 'Default' : config.m3u}`,
+                description: `Fuente: ${config.m3u === DEFAULTS.m3uUrl ? 'IPFS Default' : config.m3u}`,
                 resources: ["catalog", "meta", "stream"],
                 types: ["AceStream"],
                 catalogs: [{
@@ -181,7 +181,6 @@ const server = http.createServer(async (req, res) => {
             let selectedGenre = "TODOS";
             let searchTerm = "";
 
-            // Limpieza de basura Stremio (.json, .jso)
             if (req.url.includes('genre=')) {
                 const raw = req.url.split('genre=')[1].split('&')[0];
                 selectedGenre = decodeURIComponent(raw).replace(/\.json$/, '').replace(/\.jso$/, '');
@@ -191,7 +190,7 @@ const server = http.createServer(async (req, res) => {
                 searchTerm = decodeURIComponent(raw).replace(/\.json$/, '').toLowerCase();
             }
 
-            console.log(`--> [CATALOG] Genero: '${selectedGenre}'`);
+            console.log(`--> [CATALOG] Genero: '${selectedGenre}' | Config IP: ${config.ip || 'Orig'}`);
 
             let results = channels;
             if (searchTerm) {
@@ -261,5 +260,5 @@ const server = http.createServer(async (req, res) => {
 
 const port = process.env.PORT || 7000;
 server.listen(port, () => {
-    console.log(`--> [SERVER V10] Puerto ${port}`);
+    console.log(`--> [SERVER V11] Puerto ${port}`);
 });
