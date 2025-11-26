@@ -80,7 +80,7 @@ async function startAddon() {
 
     // --- MANIFIESTO MODIFICADO (FUERZA BRUTA) ---
     const manifest = {
-        id: "org.milista.acestream",
+        id: "org.milista.acestream.1.03",
         version: "1.0.3", // Subimos versión para forzar actualización
         name: "Mi Lista ACE",
         description: "Lista con Géneros Forzados",
