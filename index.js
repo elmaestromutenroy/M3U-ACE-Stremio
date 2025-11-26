@@ -2,54 +2,41 @@ const http = require('http');
 const fetch = require('node-fetch');
 const crypto = require("crypto");
 
-// --- 1. CONFIGURACIÓN POR DEFECTO ---
+// --- 1. CONFIGURACIÓN ---
 const DEFAULTS = {
-    // Lista IPFS original
     m3uUrl: "https://ipfs.io/ipns/k2k4r8oqlcjxsritt5mczkcn4mmvcmymbqw7113fz2flkrerfwfps004/data/listas/lista_iptv.m3u",
-    // IP por defecto: null significa "No tocar la lista original"
     targetIp: null, 
     defaultLogo: "https://upload.wikimedia.org/wikipedia/commons/thumb/1/11/Blue_question_mark_icon.svg/1024px-Blue_question_mark_icon.svg.png"
 };
 
-// --- 2. GESTOR DE LISTAS (CORE) ---
+// --- 2. GESTOR DE DATOS ---
 class AceManager {
     constructor() {
-        // Cache: Guardará versiones procesadas de la lista
-        // Clave: "URL::IP" -> Valor: Array de Canales
         this.cache = new Map(); 
         this.lastUpdates = new Map();
     }
 
-    // Obtiene la lista ya procesada según la configuración
     async getChannels(config) {
-        // ID única para esta combinación de Lista + IP
-        // Ejemplo: "http://mi-lista.com::192.168.1.50"
         const cacheKey = `${config.m3u}::${config.ip || 'original'}`;
         const now = Date.now();
 
-        // Si existe en caché y tiene menos de 10 horas, devolverla directo (RÁPIDO)
         if (this.cache.has(cacheKey) && (now - this.lastUpdates.get(cacheKey) < 36000 * 1000)) {
             return this.cache.get(cacheKey);
         }
 
-        console.log(`--> [NUEVA CARGA] Procesando lista...`);
-        console.log(`    Fuente: ${config.m3u}`);
-        console.log(`    IP Target: ${config.ip || 'Original (Sin cambios)'}`);
+        console.log(`--> [CARGA] IP Target: ${config.ip || 'Original'}`);
         
         try {
             const res = await fetch(config.m3u);
-            if (res.ok) {
+            if(res.ok) {
                 const text = await res.text();
-                // AQUÍ PASAMOS LA IP PARA QUE SE REEMPLACE UNA SOLA VEZ AL INICIO
                 const items = this.parseM3U(text, config.ip);
-                
-                // Guardamos la lista ya cocinada en caché
                 this.cache.set(cacheKey, items);
                 this.lastUpdates.set(cacheKey, now);
-                console.log(`--> [OK] ${items.length} canales procesados y cacheados.`);
+                console.log(`--> [OK] ${items.length} canales cacheados.`);
                 return items;
             } else {
-                console.log(`--> [ERROR] HTTP ${res.status} al bajar lista.`);
+                console.log(`--> [ERROR] HTTP ${res.status}`);
                 return [];
             }
         } catch (e) {
@@ -75,12 +62,8 @@ class AceManager {
                     while ((m = regex.exec(attrRaw)) !== null) attrs[m[1]] = m[2];
                     
                     let fullName = (info[3] || '').trim();
-                    
-                    // Fallback de Logo
                     let logo = attrs['tvg-logo'];
                     if (!logo || logo.trim() === "") logo = DEFAULTS.defaultLogo;
-                    
-                    // Fallback de Grupo
                     const group = attrs['group-title'] || 'OTROS';
 
                     currentItem = {
@@ -91,15 +74,10 @@ class AceManager {
                     };
                 }
             } else if (l && !l.startsWith('#') && currentItem) {
-                // --- LÓGICA DE REEMPLAZO IP (AQUÍ OCURRE LA MAGIA) ---
                 let finalUrl = l;
-                
-                // Solo reemplazamos si el usuario pidió una IP específica
                 if (targetIp && targetIp.trim() !== "") {
-                    // Reemplaza 127.0.0.1 por la IP del usuario
                     finalUrl = l.replace('127.0.0.1', targetIp);
                 }
-                
                 currentItem.url = finalUrl;
                 items.push(currentItem);
                 currentItem = null;
@@ -111,84 +89,75 @@ class AceManager {
 
 const manager = new AceManager();
 
-// --- 3. SERVIDOR HTTP PERSONALIZADO (Navaja Suiza) ---
-// Usamos http puro para tener control total de las rutas y redirecciones
+// --- 3. SERVIDOR ---
 const server = http.createServer(async (req, res) => {
-    // CORS Headers (Vital para Stremio Web)
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
 
-    if (req.method === 'OPTIONS') {
-        res.writeHead(200);
-        res.end();
-        return;
-    }
+    if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
     try {
+        // LOG CHIVATO: Ver qué pide Stremio exactamente
+        console.log(`--> [PETICIÓN] URL: ${req.url}`);
+
         const u = new URL(req.url, `http://${req.headers.host}`);
         const pathSegments = u.pathname.split('/').filter(Boolean);
 
-        // --- A. DETECTAR PARÁMETROS Y REDIRIGIR (INSTALACIÓN) ---
-        // Si entran por ?ip=... o ?m3u=..., creamos la configuración y redirigimos
+        // A. REDIRECCIÓN (SETUP)
         if (u.searchParams.has('ip') || u.searchParams.has('m3u')) {
             const configObj = {
-                ip: u.searchParams.get('ip') || null, // Si no hay IP, null (Original)
+                ip: u.searchParams.get('ip') || null,
                 m3u: u.searchParams.get('m3u') || DEFAULTS.m3uUrl
             };
-            
-            // Convertimos config a base64 para que sea una URL válida y persistente
             const configStr = Buffer.from(JSON.stringify(configObj)).toString('base64url');
-            
-            // Redirección 302 a la nueva ruta "congelada"
+            console.log(`--> [REDIRECT] Config creada: ${configStr}`);
             res.writeHead(302, { 'Location': `/${configStr}/manifest.json` });
             res.end();
             return;
         }
 
-        // --- B. LEER CONFIGURACIÓN DE LA RUTA ---
+        // B. PARSEO RUTA
         let config = { ip: null, m3u: DEFAULTS.m3uUrl };
         let resource = "";
 
-        // Caso 1: Ruta Raíz -> Configuración por defecto (IPFS + IP Original)
-        if (pathSegments.length === 0 || pathSegments[0] === 'manifest.json') {
-            resource = pathSegments[0] || 'manifest.json';
-        } 
-        // Caso 2: Ruta Configurada (/BASE64/...)
-        else {
+        // Detectar si el primer segmento es configuración (Base64)
+        if (pathSegments.length > 0 && pathSegments[0] !== 'manifest.json' && !pathSegments[0].includes('/')) {
             try {
-                // Intentamos decodificar el primer segmento
                 const decoded = Buffer.from(pathSegments[0], 'base64url').toString();
                 const parsed = JSON.parse(decoded);
-                // Fusionamos con defaults
-                config = { ...config, ...parsed };
-                // El resto de la ruta es el recurso (catalog, meta, stream)
-                resource = pathSegments.slice(1).join('/');
+                // Verificamos que sea un JSON válido de config
+                if (parsed.m3u || parsed.ip === null || parsed.ip) {
+                    config = { ...config, ...parsed };
+                    resource = pathSegments.slice(1).join('/');
+                } else {
+                    resource = pathSegments.join('/');
+                }
             } catch {
-                // Si falla, asumimos ruta normal
                 resource = pathSegments.join('/');
             }
+        } else {
+            resource = pathSegments.join('/');
         }
         
         if (resource === '') resource = 'manifest.json';
 
-        // --- C. PREPARAR DATOS ---
-        // Pedimos al manager los canales ya procesados para esta config
+        // C. CARGA DE DATOS
         const channels = await manager.getChannels(config);
-        
-        // Sacamos géneros dinámicos de esta lista específica
         const genres = [...new Set(channels.map(c => c.group))].sort();
         const dynamicGenres = ["TODOS", ...genres];
 
-        // --- D. RESPONDER A STREMIO (MANUALMENTE) ---
+        // D. RESPUESTAS
 
-        // 1. MANIFIESTO
         if (resource === 'manifest.json') {
+            // ID DINÁMICO: Evita conflictos en Stremio si instalas varias IPs
+            const safeIP = (config.ip || 'default').replace(/\./g, '-');
+            
             const manifest = {
-                id: "org.milista.ace.v9",
-                version: "1.0.9",
-                // Nombre dinámico para que sepas qué configuración tienes instalada
-                name: config.ip ? `ACE (${config.ip})` : "ACE (Original)",
-                description: `Fuente: ${config.m3u === DEFAULTS.m3uUrl ? 'Default' : 'Custom'}`,
+                id: `org.milista.ace.v10.${safeIP}`, // <--- CAMBIO CLAVE
+                version: "1.0.10",
+                name: config.ip ? `ACE (${config.ip})` : "ACE (Default)",
+                description: "Lista Dinámica V10",
+                description: `Fuente: ${config.m3u === DEFAULTS.m3uUrl ? 'Default' : config.m3u}`,
                 resources: ["catalog", "meta", "stream"],
                 types: ["AceStream"],
                 catalogs: [{
@@ -208,25 +177,23 @@ const server = http.createServer(async (req, res) => {
             return;
         }
 
-        // 2. CATÁLOGO (LISTA DE CANALES)
         if (resource.startsWith('catalog/')) {
             let selectedGenre = "TODOS";
             let searchTerm = "";
 
-            // Limpieza de .json y bug de Stremio
+            // Limpieza de basura Stremio (.json, .jso)
             if (req.url.includes('genre=')) {
-                const rawGenre = req.url.split('genre=')[1].split('&')[0];
-                selectedGenre = decodeURIComponent(rawGenre).replace('.json', '').replace('.jso', '');
+                const raw = req.url.split('genre=')[1].split('&')[0];
+                selectedGenre = decodeURIComponent(raw).replace(/\.json$/, '').replace(/\.jso$/, '');
             }
             if (req.url.includes('search=')) {
-                const rawSearch = req.url.split('search=')[1].split('&')[0];
-                searchTerm = decodeURIComponent(rawSearch).replace('.json', '').toLowerCase();
+                const raw = req.url.split('search=')[1].split('&')[0];
+                searchTerm = decodeURIComponent(raw).replace(/\.json$/, '').toLowerCase();
             }
 
-            console.log(`--> [REQ] Catálogo: ${selectedGenre} | IP: ${config.ip || 'Orig'}`);
+            console.log(`--> [CATALOG] Genero: '${selectedGenre}'`);
 
             let results = channels;
-
             if (searchTerm) {
                 results = results.filter(c => c.name.toLowerCase().includes(searchTerm));
             } else if (selectedGenre !== "TODOS") {
@@ -246,7 +213,6 @@ const server = http.createServer(async (req, res) => {
             return;
         }
 
-        // 3. META (DETALLES)
         if (resource.startsWith('meta/')) {
             const id = resource.split('/').pop().replace('.json', '');
             const channel = channels.find(c => c.id === id);
@@ -260,20 +226,18 @@ const server = http.createServer(async (req, res) => {
                     name: channel.name,
                     poster: channel.logo,
                     background: channel.logo,
-                    description: `Grupo: ${channel.group}\nIP Config: ${config.ip || 'Original'}`,
+                    description: `Grupo: ${channel.group}\nIP: ${config.ip}`,
                     behaviorHints: { isLive: true }
                 }
             }));
             return;
         }
 
-        // 4. STREAM (VIDEO)
         if (resource.startsWith('stream/')) {
             const id = resource.split('/').pop().replace('.json', '');
             const channel = channels.find(c => c.id === id);
             if (!channel) return res.end(JSON.stringify({ streams: [] }));
 
-            // La URL ya viene cambiada desde el manager si hizo falta
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({
                 streams: [{
@@ -285,7 +249,6 @@ const server = http.createServer(async (req, res) => {
             return;
         }
 
-        // 404 Not Found
         res.writeHead(404);
         res.end();
 
@@ -298,5 +261,5 @@ const server = http.createServer(async (req, res) => {
 
 const port = process.env.PORT || 7000;
 server.listen(port, () => {
-    console.log(`--> [SERVER V9] Escuchando en puerto ${port}`);
+    console.log(`--> [SERVER V10] Puerto ${port}`);
 });
