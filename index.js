@@ -8,10 +8,10 @@ const CONFIG = {
     // Tu lista remota
     m3uUrl: "http://coincity.tk/f/acem3u.m3u",
     // EPGs (Se intentarán cargar para cruzar datos)
-    // epgUrls: [
+     epgUrls: [
     //    "https://raw.githubusercontent.com/davidmuma/EPG_dobleM/refs/heads/master/guiatv.xml",
     //    "https://raw.githubusercontent.com/davidmuma/EPG_dobleM/master/guiatv.xml"
-    //]
+    ]
 };
 
 // --- 2. GESTOR DE DATOS (Clase interna) ---
