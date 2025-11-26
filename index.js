@@ -20,19 +20,20 @@ class AceManager {
         const cacheKey = `${config.m3u}::${config.ip || 'original'}`;
         const now = Date.now();
 
-        // Caché de 10 horas
         if (this.cache.has(cacheKey) && (now - this.lastUpdates.get(cacheKey) < 36000 * 1000)) {
             return this.cache.get(cacheKey);
         }
 
         console.log(`--> [CARGA] Procesando lista...`);
-        console.log(`    IP: ${config.ip || 'Original'} | URL: ${config.m3u}`);
+        console.log(`    IP Target: ${config.ip || 'Original (127.0.0.1)'} | URL: ${config.m3u}`);
         
         try {
             const res = await fetch(config.m3u);
             if(res.ok) {
                 const text = await res.text();
+                // Pasamos la IP para que se reemplace AHORA
                 const items = this.parseM3U(text, config.ip);
+                
                 this.cache.set(cacheKey, items);
                 this.lastUpdates.set(cacheKey, now);
                 console.log(`--> [OK] ${items.length} canales listos.`);
@@ -76,8 +77,10 @@ class AceManager {
                     };
                 }
             } else if (l && !l.startsWith('#') && currentItem) {
+                // LÓGICA DE REEMPLAZO DE IP
                 let finalUrl = l;
                 if (targetIp && targetIp.trim() !== "") {
+                    // Aquí se hace la magia: cambiamos 127.0.0.1 por tu IP
                     finalUrl = l.replace('127.0.0.1', targetIp);
                 }
                 currentItem.url = finalUrl;
@@ -102,9 +105,8 @@ const server = http.createServer(async (req, res) => {
         const u = new URL(req.url, `http://${req.headers.host}`);
         const pathSegments = u.pathname.split('/').filter(Boolean);
 
-        // A. REDIRECCIÓN (FIX BUCLE INFINITO)
-        // Solo redirigimos si hay parámetros Y estamos intentando instalar (manifest o root)
-        // Si la URL contiene 'catalog', 'meta' o 'stream', IGNORAMOS los parámetros y seguimos.
+        // A. DETECCIÓN DE PARÁMETROS PARA REDIRECCIÓN (SOLO EN INSTALL)
+        // Si estamos en la raiz o manifest.json y hay params, redirigimos para "congelar" la config
         const isInstallUrl = pathSegments.length === 0 || (pathSegments.length === 1 && pathSegments[0] === 'manifest.json');
         
         if ((u.searchParams.has('ip') || u.searchParams.has('m3u')) && isInstallUrl) {
@@ -113,36 +115,43 @@ const server = http.createServer(async (req, res) => {
                 m3u: u.searchParams.get('m3u') || DEFAULTS.m3uUrl
             };
             const configStr = Buffer.from(JSON.stringify(configObj)).toString('base64url');
-            console.log(`--> [REDIRECT] Nueva config detectada. Redirigiendo...`);
+            console.log(`--> [REDIRECT] Configurando entorno...`);
             res.writeHead(302, { 'Location': `/${configStr}/manifest.json` });
             res.end();
             return;
         }
 
-        // B. PARSEO RUTA
+        // B. LEER CONFIGURACIÓN (HÍBRIDA)
         let config = { ip: null, m3u: DEFAULTS.m3uUrl };
         let resource = "";
 
+        // 1. Intentar leer desde la RUTA (Base64)
+        let configFoundInPath = false;
         if (pathSegments.length > 0 && pathSegments[0] !== 'manifest.json' && !pathSegments[0].includes('/')) {
             try {
                 const decoded = Buffer.from(pathSegments[0], 'base64url').toString();
                 const parsed = JSON.parse(decoded);
-                if (parsed.m3u || parsed.ip === null || parsed.ip) {
-                    config = { ...config, ...parsed };
-                    resource = pathSegments.slice(1).join('/');
-                } else {
-                    resource = pathSegments.join('/');
-                }
+                config = { ...config, ...parsed };
+                resource = pathSegments.slice(1).join('/');
+                configFoundInPath = true;
             } catch {
                 resource = pathSegments.join('/');
             }
         } else {
             resource = pathSegments.join('/');
         }
+
+        // 2. Intentar leer desde PARÁMETROS URL (Fallback vital)
+        // Si no encontramos config en el path, miramos si Stremio nos la manda en ?ip=
+        if (!configFoundInPath) {
+            if (u.searchParams.has('ip')) config.ip = u.searchParams.get('ip');
+            if (u.searchParams.has('m3u')) config.m3u = u.searchParams.get('m3u');
+        }
         
         if (resource === '') resource = 'manifest.json';
 
         // C. CARGA DE DATOS
+        // Ahora 'config' tiene la IP correcta sea cual sea el método que usó Stremio
         const channels = await manager.getChannels(config);
         const genres = [...new Set(channels.map(c => c.group))].sort();
         const dynamicGenres = ["TODOS", ...genres];
@@ -150,14 +159,12 @@ const server = http.createServer(async (req, res) => {
         // D. RESPUESTAS
 
         if (resource === 'manifest.json') {
-            // ID DINÁMICO V11
             const safeIP = (config.ip || 'default').replace(/\./g, '-');
-            
             const manifest = {
-                id: `org.milista.ace.v11.${safeIP}`, // Versión 11
-                version: "1.0.11",
-                name: config.ip ? `ACE (${config.ip})` : "ACE (Default)",
-                description: `Fuente: ${config.m3u === DEFAULTS.m3uUrl ? 'IPFS Default' : config.m3u}`,
+                id: `org.milista.ace.v12.${safeIP}`, 
+                version: "1.0.12",
+                name: config.ip ? `ACE (${config.ip})` : "ACE (Original)",
+                description: `Fuente: ${config.m3u === DEFAULTS.m3uUrl ? 'Default' : 'Personalizada'}`,
                 resources: ["catalog", "meta", "stream"],
                 types: ["AceStream"],
                 catalogs: [{
@@ -181,16 +188,17 @@ const server = http.createServer(async (req, res) => {
             let selectedGenre = "TODOS";
             let searchTerm = "";
 
+            // Limpieza Agresiva de URL
             if (req.url.includes('genre=')) {
-                const raw = req.url.split('genre=')[1].split('&')[0];
-                selectedGenre = decodeURIComponent(raw).replace(/\.json$/, '').replace(/\.jso$/, '');
+                const raw = req.url.split('genre=')[1].split('.json')[0].split('&')[0].split('?')[0];
+                selectedGenre = decodeURIComponent(raw);
             }
             if (req.url.includes('search=')) {
-                const raw = req.url.split('search=')[1].split('&')[0];
-                searchTerm = decodeURIComponent(raw).replace(/\.json$/, '').toLowerCase();
+                const raw = req.url.split('search=')[1].split('.json')[0].split('&')[0].split('?')[0];
+                searchTerm = decodeURIComponent(raw).toLowerCase();
             }
 
-            console.log(`--> [CATALOG] Genero: '${selectedGenre}' | Config IP: ${config.ip || 'Orig'}`);
+            console.log(`--> [CATALOG] Genero: '${selectedGenre}' | IP Usada: ${config.ip || 'Original'}`);
 
             let results = channels;
             if (searchTerm) {
@@ -213,7 +221,7 @@ const server = http.createServer(async (req, res) => {
         }
 
         if (resource.startsWith('meta/')) {
-            const id = resource.split('/').pop().replace('.json', '');
+            const id = resource.split('/').pop().replace('.json', '').split('?')[0];
             const channel = channels.find(c => c.id === id);
             if (!channel) return res.end(JSON.stringify({ meta: null }));
 
@@ -225,7 +233,7 @@ const server = http.createServer(async (req, res) => {
                     name: channel.name,
                     poster: channel.logo,
                     background: channel.logo,
-                    description: `Grupo: ${channel.group}\nIP: ${config.ip}`,
+                    description: `Grupo: ${channel.group}\nIP: ${config.ip || 'Original'}`,
                     behaviorHints: { isLive: true }
                 }
             }));
@@ -233,9 +241,13 @@ const server = http.createServer(async (req, res) => {
         }
 
         if (resource.startsWith('stream/')) {
-            const id = resource.split('/').pop().replace('.json', '');
+            const id = resource.split('/').pop().replace('.json', '').split('?')[0];
             const channel = channels.find(c => c.id === id);
             if (!channel) return res.end(JSON.stringify({ streams: [] }));
+
+            // La URL ya viene cambiada desde el manager (getChannels la procesó)
+            // Pero por seguridad, hacemos un log para ver qué estamos mandando
+            // console.log(`--> [STREAM] Entregando URL: ${channel.url}`);
 
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({
@@ -260,5 +272,5 @@ const server = http.createServer(async (req, res) => {
 
 const port = process.env.PORT || 7000;
 server.listen(port, () => {
-    console.log(`--> [SERVER V11] Puerto ${port}`);
+    console.log(`--> [SERVER V12] Puerto ${port}`);
 });
