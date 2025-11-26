@@ -5,7 +5,6 @@ const crypto = require("crypto");
 // --- 1. CONFIGURACIÓN ---
 const CONFIG = {
     m3uUrl: "http://coincity.tk/f/acem3u.m3u",
-    // Logo genérico para canales sin imagen (Esencial para que Stremio no los oculte)
     defaultLogo: "https://upload.wikimedia.org/wikipedia/commons/thumb/1/11/Blue_question_mark_icon.svg/1024px-Blue_question_mark_icon.svg.png"
 };
 
@@ -50,7 +49,6 @@ class AceManager {
                     const fullName = (info[3] || '').trim();
                     const group = attrs['group-title'] || 'OTROS';
                     
-                    // Limpieza de logo: Si está vacío, es null
                     let logo = attrs['tvg-logo'];
                     if (logo && logo.trim() === "") logo = null;
 
@@ -86,13 +84,11 @@ async function startAddon() {
     
     console.log(`--> [GÉNEROS] ${dynamicGenres.length} categorías listas.`);
 
-    // --- MANIFIESTO ---
     const manifest = {
-        // Subimos versión para asegurar refresco
-        id: "org.milista.final.v5", 
-        version: "5.0.0", 
-        name: "Mi Lista ACE (v5)",
-        description: "Lista con Logos Default",
+        id: "org.milista.final.v6", // Subimos a v6
+        version: "6.0.0", 
+        name: "Mi Lista ACE (v6)",
+        description: "Lista FIX .jso",
         resources: ["catalog", "meta", "stream"],
         types: ["AceStream"],
         catalogs: [
@@ -113,16 +109,23 @@ async function startAddon() {
 
     const builder = new addonBuilder(manifest);
 
-    // HANDLER CATÁLOGO (EL QUE FALLABA)
     builder.defineCatalogHandler((args) => {
-        console.log(`--> [SOLICITUD] Catálogo: ${args.id} | Género: ${args.extra?.genre || 'Ninguno'}`);
+        // --- LIMPIEZA DE BASURA STREMIO (.jso) ---
+        let selectedGenre = args.extra?.genre;
+        
+        if (selectedGenre) {
+            // Quitamos .json o .jso del final si existe
+            selectedGenre = selectedGenre.replace('.json', '').replace('.jso', '');
+        }
+
+        console.log(`--> [SOLICITUD] Original: ${args.extra?.genre} | Limpio: ${selectedGenre}`);
 
         if (args.type === "AceStream" && args.id === "mi_lista") {
             let items = manager.channels;
             
-            // Filtro Género
-            if (args.extra && args.extra.genre && args.extra.genre !== "TODOS") {
-                items = items.filter(i => i.group === args.extra.genre);
+            // Filtro Género (Usamos la variable limpia 'selectedGenre')
+            if (selectedGenre && selectedGenre !== "TODOS") {
+                items = items.filter(i => i.group === selectedGenre);
             }
             
             // Filtro Búsqueda
@@ -130,12 +133,10 @@ async function startAddon() {
                 items = items.filter(i => i.name.toLowerCase().includes(args.extra.search.toLowerCase()));
             }
 
-            // Mapeo con LOGO POR DEFECTO
             const metas = items.map(c => ({
                 id: c.id,
                 type: "AceStream",
                 name: c.name,
-                // Si no hay logo, usa el genérico. Si no, Stremio lo oculta.
                 poster: c.logo || CONFIG.defaultLogo,
                 description: c.group
             }));
@@ -182,7 +183,7 @@ async function startAddon() {
     const addonInterface = builder.getInterface();
     serveHTTP(addonInterface, { port: process.env.PORT || 7000 });
     
-    console.log("--> [SERVIDOR] Online v5.");
+    console.log("--> [SERVIDOR] Online v6.");
     setInterval(() => manager.updateData(), 36000 * 1000);
 }
 
