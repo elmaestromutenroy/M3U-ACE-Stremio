@@ -75,15 +75,19 @@ async function startAddon() {
     const manager = new AceManager();
     await manager.updateData();
     
-    const dynamicGenres = manager.getGenres();
-    console.log("--> [GÉNEROS] Detectados:", dynamicGenres);
+    // OBTENER GÉNEROS Y AÑADIR "TODOS" (El seguro de vida)
+    const rawGenres = manager.getGenres();
+    const dynamicGenres = ["TODOS", ...rawGenres];
+    
+    console.log(`--> [GÉNEROS] Se han detectado ${dynamicGenres.length} categorías.`);
+    console.log("--> [DEBUG] Lista: ", dynamicGenres.join(", "));
 
-    // --- MANIFIESTO MODIFICADO (FUERZA BRUTA) ---
+    // --- MANIFIESTO (ID NUEVO v4) ---
     const manifest = {
-        id: "org.milista.acestream.v03",
-        version: "1.0.3", // Subimos versión para forzar actualización
-        name: "Lista M3U - ACE",
-        description: "Lista m3u con enlaces ACE",
+        id: "org.milista.final.v4", 
+        version: "4.0.0", 
+        name: "Mi Lista ACE (v4)",
+        description: "Lista con Géneros OK",
         resources: ["catalog", "meta", "stream"],
         types: ["AceStream"],
         catalogs: [
@@ -95,11 +99,11 @@ async function startAddon() {
                     { 
                         name: "genre", 
                         isRequired: false, 
-                        // AQUÍ EL CAMBIO: Metemos las opciones explícitamente dentro de 'extra'
+                        // OBLIGATORIO: Pasamos las opciones aquí
                         options: dynamicGenres 
                     }, 
                     { name: "search" },
-                    { name: "skip" } // Añadido SKIP por compatibilidad
+                    { name: "skip" }
                 ],
                 genres: dynamicGenres
             }
@@ -109,18 +113,17 @@ async function startAddon() {
 
     const builder = new addonBuilder(manifest);
 
-    // --- HANDLERS ---
-    
+    // HANDLERS
     builder.defineCatalogHandler((args) => {
         if (args.type === "AceStream" && args.id === "mi_lista") {
             let items = manager.channels;
             
-            // Filtro Género
-            if (args.extra && args.extra.genre) {
+            // Filtro de Género (Ignoramos si es "TODOS")
+            if (args.extra && args.extra.genre && args.extra.genre !== "TODOS") {
                 items = items.filter(i => i.group === args.extra.genre);
             }
             
-            // Filtro Búsqueda
+            // Filtro de Búsqueda
             if (args.extra && args.extra.search) {
                 items = items.filter(i => i.name.toLowerCase().includes(args.extra.search.toLowerCase()));
             }
@@ -170,8 +173,10 @@ async function startAddon() {
 
     const addonInterface = builder.getInterface();
     serveHTTP(addonInterface, { port: process.env.PORT || 7000 });
-    console.log("--> [SERVIDOR] Online.");
     
+    console.log("--> [SERVIDOR] Online v4.");
+    
+    // Actualizar cada 10 horas
     setInterval(() => manager.updateData(), 36000 * 1000);
 }
 
