@@ -241,5 +241,5 @@ builder.defineStreamHandler(async (args) => {
 const addonInterface = builder.getInterface();
 serveHTTP(addonInterface, { port: process.env.PORT || 7000 });
 
-// Actualizar lista automáticamente cada 1 hora
-setInterval(() => manager.updateData(), 3600 * 1000);
+// Actualizar lista automáticamente cada 10 hora
+setInterval(() => manager.updateData(), 36000 * 1000);
